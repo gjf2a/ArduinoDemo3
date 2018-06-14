@@ -7,6 +7,7 @@ import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbEndpoint;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
+import android.util.Log;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,6 +28,38 @@ public class ArduinoTalker {
 
     private final int INCOMING_SIZE = 1;
 
+    private static final String TAG = ArduinoTalker.class.getSimpleName();
+
+    // From https://github.com/felHR85/UsbSerial/blob/master/usbserial/src/main/java/com/felhr/usbserial/CDCSerialDevice.java
+    private static final int CDC_REQTYPE_HOST2DEVICE = 0x21;
+    private static final int CDC_REQTYPE_DEVICE2HOST = 0xA1;
+
+    private static final int CDC_SET_LINE_CODING = 0x20;
+    private static final int CDC_GET_LINE_CODING = 0x21;
+    private static final int CDC_SET_CONTROL_LINE_STATE = 0x22;
+
+    private static final int CDC_CONTROL_LINE_ON = 0x0003;
+    private static final int CDC_CONTROL_LINE_OFF = 0x0000;
+
+    private static final int DEFAULT_BAUD_RATE = 9600;
+
+    /***
+     *  Default Serial Configuration
+     *  Baud rate: DEFAULT_BAUD_RATE
+     *  Data bits: 8
+     *  Stop bits: 1
+     *  Parity: None
+     */
+    private static final byte[] CDC_DEFAULT_LINE_CODING = new byte[] {
+            (byte) (DEFAULT_BAUD_RATE & 0xff),
+            (byte) (DEFAULT_BAUD_RATE >> 8 & 0xff),
+            (byte) (DEFAULT_BAUD_RATE >> 16 & 0xff),
+            (byte) (DEFAULT_BAUD_RATE >> 24 & 0xff),
+            (byte) 0x00, // Offset 5 bCharFormat (1 Stop bit)
+            (byte) 0x00, // bParityType (None)
+            (byte) 0x08  // bDataBits (8)
+    };
+
     public void addListener(TalkerListener listener) {
         listeners.add(listener);
     }
@@ -37,6 +70,7 @@ public class ArduinoTalker {
             checkAllDevices(mUsbManager.getDeviceList());
         } catch (Exception e) {
             statusMessage = "Error: " + e.getMessage();
+            Log.e(TAG, statusMessage);
         }
     }
 
@@ -64,23 +98,28 @@ public class ArduinoTalker {
             device = entry.getValue();
             processDevice();
             if (deviceOk) {
+                Log.i(TAG, "Device found");
                 return;
             }
         }
         statusMessage += "\nNo suitable devices found";
+        Log.i(TAG, "No device found");
     }
 
     private void processDevice() {
         int id = device.getVendorId();
         statusMessage += "\nConsidering Vendor: " + id;
         if (id == 10755 || id == 9025) {
+            Log.i(TAG, "Processing interfaces for " + id);
             processAllInterfaces();
         }
     }
 
     private void processAllInterfaces() {
         for (int i = 0; i < device.getInterfaceCount(); i++) {
+            Log.i(TAG, "Interface class:" + device.getInterface(i).getInterfaceClass());
             if (isBulkInterface(device.getInterface(i))) {
+                Log.i(TAG, "Bulk interface; setting up endpoints");
                 usbInterface = device.getInterface(i);
                 setupEndpoints();
                 return;
@@ -95,8 +134,10 @@ public class ArduinoTalker {
             if (endpoint.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
                 if (endpoint.getDirection() == UsbConstants.USB_DIR_IN) {
                     device2Host = endpoint;
+                    Log.i(TAG, "device2Host set");
                 } else if (endpoint.getDirection() == UsbConstants.USB_DIR_OUT) {
                     host2Device = endpoint;
+                    Log.i(TAG, "host2Device set");
                 }
             }
         }
@@ -132,46 +173,63 @@ public class ArduinoTalker {
         }
     }
 
+    private byte[] copyDefaultLineCoding() {
+        byte[] bytes = new byte[CDC_DEFAULT_LINE_CODING.length];
+        for (int i = 0; i < bytes.length; i++) {
+            bytes[i] = CDC_DEFAULT_LINE_CODING[i];
+        }
+        return bytes;
+    }
+
+    private int transfer(UsbEndpoint endpoint, byte[] bytes, String label) {
+        try {
+            UsbDeviceConnection connection = usbManager.openDevice(device);
+            connection.claimInterface(usbInterface, true);
+            Log.i(TAG,"Opened " + label + " connection");
+            byte[] encoding = copyDefaultLineCoding();
+            int response = setControlCommand(connection, CDC_SET_LINE_CODING, 0, encoding);
+            response = setControlCommand(connection, CDC_SET_CONTROL_LINE_STATE, CDC_CONTROL_LINE_ON, new byte[0]);
+            int result = connection.bulkTransfer(endpoint, bytes, bytes.length, 0);
+            response = setControlCommand(connection, CDC_SET_CONTROL_LINE_STATE, CDC_CONTROL_LINE_OFF, new byte[0]);
+            connection.releaseInterface(usbInterface);
+            connection.close();
+            Log.i(TAG, "Closed connection; code " + result);
+            statusMessage = "Code: " + result;
+            for (int r : bytes) {
+                statusMessage += ";" + r;
+            }
+            Log.i(TAG, label + ":" + statusMessage);
+            return result;
+        } catch (Exception exc) {
+            statusMessage = label + "Error:" + exc.getClass().getSimpleName() + "; "+ exc.getMessage();
+            Log.e(TAG, statusMessage);
+            notifyError();
+            return -1;
+        }
+    }
+
+    // Adapted from https://github.com/felHR85/UsbSerial/blob/master/usbserial/src/main/java/com/felhr/usbserial/CDCSerialDevice.java
+    private int setControlCommand(UsbDeviceConnection connection, int request, int value, byte[] data) {
+        int response = connection.controlTransfer(CDC_REQTYPE_HOST2DEVICE, request, value, 0, data, data.length, 0);
+        Log.i(TAG,"Control Transfer Response: " + String.valueOf(response));
+        return response;
+    }
+
     public void send(final byte[] bytes) {
         new Thread(new Runnable(){public void run() {
-            try {
-                UsbDeviceConnection connection = usbManager.openDevice(device);
-                connection.claimInterface(usbInterface, true);
-                statusMessage = "Opened send connection";
-                int result = connection.bulkTransfer(host2Device, bytes, bytes.length, 0);
-                connection.releaseInterface(usbInterface);
-                connection.close();
-                statusMessage = "Closed connection; code " + result;
-                for (TalkerListener listener : listeners) {
-                    listener.sendComplete(result);
-                }
-            } catch (Exception exc) {
-                statusMessage = "SendError:" + exc.getClass().getSimpleName() + "; " + exc.getMessage();
-                notifyError();
+            int result = transfer(host2Device, bytes, "Send");
+            for (TalkerListener listener : listeners) {
+                listener.sendComplete(result);
             }
         }}).start();
     }
 
     public void receive() {
         new Thread(new Runnable(){public void run() {
-            try {
-                UsbDeviceConnection connection = usbManager.openDevice(device);
-                connection.claimInterface(usbInterface, true);
-                statusMessage = "Opened receive connection";
-                byte[] received = new byte[INCOMING_SIZE];
-                int result = connection.bulkTransfer(device2Host, received, received.length, 0);
-                connection.releaseInterface(usbInterface);
-                connection.close();
-                statusMessage = "Code: " + result;
-                for (int r : received) {
-                    statusMessage += ";" + r;
-                }
-                for (TalkerListener listener : listeners) {
-                    listener.receiveComplete(result);
-                }
-            } catch (Exception exc) {
-                statusMessage = "ReceiveError:" + exc.getClass().getSimpleName() + "; "+ exc.getMessage();
-                notifyError();
+            byte[] received = new byte[INCOMING_SIZE];
+            int result = transfer(device2Host, received, "Receive");
+            for (TalkerListener listener : listeners) {
+                listener.receiveComplete(result);
             }
         }}).start();
     }
