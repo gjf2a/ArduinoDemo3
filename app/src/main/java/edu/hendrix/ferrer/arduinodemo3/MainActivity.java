@@ -18,7 +18,6 @@ import android.widget.TextView;
 
 public class MainActivity extends AppCompatActivity implements TalkerListener {
 
-    //private EditText textView;
     private TextView textView;
     private ArduinoTalker talker;
 
@@ -27,9 +26,15 @@ public class MainActivity extends AppCompatActivity implements TalkerListener {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         textView = findViewById(R.id.textView);
-        //textView = findViewById(R.id.editText);
-        //talker = new ArduinoTalker(getIntent()); // Doesn't work...
         deviceCheck();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (talker != null) {
+            talker.close();
+        }
     }
 
     public void deviceCheckHandler(View view) {

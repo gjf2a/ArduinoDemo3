@@ -22,6 +22,7 @@ public class ArduinoTalker {
     private UsbManager usbManager;
     private UsbDevice device;
     private UsbInterface usbInterface;
+    private UsbDeviceConnection connection;
     private UsbEndpoint host2Device, device2Host;
     private String statusMessage = "ok";
     private ArrayList<TalkerListener> listeners = new ArrayList<>();
@@ -74,24 +75,6 @@ public class ArduinoTalker {
         }
     }
 
-    // This always results in an exception:
-    // String resource ID #0x2a03
-    // I can't find a solution.
-    // Hence, I created the alternate version above, which does seem to work.
-    public ArduinoTalker(Intent intent, UsbManager mUsbManager) {
-        this.usbManager = mUsbManager;
-        device = (UsbDevice) intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-        if (device == null) {
-            statusMessage = "Device attached, but not accessible";
-        } else {
-            try {
-                processDevice();
-            } catch (Exception e) {
-                statusMessage = "Error:" + e.getMessage();
-            }
-        }
-    }
-
     private void checkAllDevices(HashMap<String, UsbDevice> devices) {
         statusMessage = "Checking all devices";
         for (Map.Entry<String, UsbDevice> entry : devices.entrySet()) {
@@ -119,8 +102,14 @@ public class ArduinoTalker {
         for (int i = 0; i < device.getInterfaceCount(); i++) {
             Log.i(TAG, "Interface class:" + device.getInterface(i).getInterfaceClass());
             if (isBulkInterface(device.getInterface(i))) {
-                Log.i(TAG, "Bulk interface; setting up endpoints");
+                Log.i(TAG, "Bulk interface");
                 usbInterface = device.getInterface(i);
+                connection = usbManager.openDevice(device);
+                connection.claimInterface(usbInterface, true);
+                byte[] encoding = copyDefaultLineCoding();
+                int response = setControlCommand(CDC_SET_LINE_CODING, 0, encoding);
+                response = setControlCommand(CDC_SET_CONTROL_LINE_STATE, CDC_CONTROL_LINE_ON, new byte[0]);
+                Log.i(TAG, "Setting up endpoints");
                 setupEndpoints();
                 return;
             }
@@ -181,18 +170,16 @@ public class ArduinoTalker {
         return bytes;
     }
 
+    public void close() {
+        int response = setControlCommand(CDC_SET_CONTROL_LINE_STATE, CDC_CONTROL_LINE_OFF, new byte[0]);
+        connection.releaseInterface(usbInterface);
+        connection.close();
+    }
+
     private int transfer(UsbEndpoint endpoint, byte[] bytes, String label) {
         try {
-            UsbDeviceConnection connection = usbManager.openDevice(device);
-            connection.claimInterface(usbInterface, true);
             Log.i(TAG,"Opened " + label + " connection");
-            byte[] encoding = copyDefaultLineCoding();
-            int response = setControlCommand(connection, CDC_SET_LINE_CODING, 0, encoding);
-            response = setControlCommand(connection, CDC_SET_CONTROL_LINE_STATE, CDC_CONTROL_LINE_ON, new byte[0]);
             int result = connection.bulkTransfer(endpoint, bytes, bytes.length, 0);
-            response = setControlCommand(connection, CDC_SET_CONTROL_LINE_STATE, CDC_CONTROL_LINE_OFF, new byte[0]);
-            connection.releaseInterface(usbInterface);
-            connection.close();
             Log.i(TAG, "Closed connection; code " + result);
             statusMessage = "Code: " + result;
             for (int r : bytes) {
@@ -209,7 +196,7 @@ public class ArduinoTalker {
     }
 
     // Adapted from https://github.com/felHR85/UsbSerial/blob/master/usbserial/src/main/java/com/felhr/usbserial/CDCSerialDevice.java
-    private int setControlCommand(UsbDeviceConnection connection, int request, int value, byte[] data) {
+    private int setControlCommand(int request, int value, byte[] data) {
         int response = connection.controlTransfer(CDC_REQTYPE_HOST2DEVICE, request, value, 0, data, data.length, 0);
         Log.i(TAG,"Control Transfer Response: " + String.valueOf(response));
         return response;
