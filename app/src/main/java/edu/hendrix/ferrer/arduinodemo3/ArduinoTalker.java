@@ -27,7 +27,7 @@ public class ArduinoTalker {
     private String statusMessage = "ok";
     private ArrayList<TalkerListener> listeners = new ArrayList<>();
 
-    private final int INCOMING_SIZE = 1;
+    private static final int INCOMING_SIZE = 1;
 
     private static final String TAG = ArduinoTalker.class.getSimpleName();
 
@@ -92,7 +92,7 @@ public class ArduinoTalker {
     private void processDevice() {
         int id = device.getVendorId();
         statusMessage += "\nConsidering Vendor: " + id;
-        if (id == 10755 || id == 9025) {
+        if (id == 10755 || id == 0x9025) {
             Log.i(TAG, "Processing interfaces for " + id);
             processAllInterfaces();
         }
